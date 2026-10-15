@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Iframe Test Env</title>
+<style>
+  * { box-sizing: border-box; font-family: Arial, sans-serif; }
+  body { margin: 30px; background: #f5f5f5; color: #222; }
+
+  .controls { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .controls input { flex: 1; min-width: 220px; padding: 10px; font-size: 14px; }
+  #ancestor { flex: 0 1 320px; }
+  button { padding: 10px 18px; cursor: pointer; font-size: 14px; }
+  .hint { font-size: 12px; color: #666; margin: 0 0 20px; }
+
+  #overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.65);
+    display: none; justify-content: center; align-items: center; z-index: 9999;
+  }
+  #modal {
+    width: 90vw; height: 90vh; background: white; border-radius: 8px;
+    overflow: hidden; box-shadow: 0 0 25px rgba(0,0,0,.3);
+    display: flex; flex-direction: column;
+  }
+
+  #bar {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    border-bottom: 1px solid #ddd; background: #fafafa; font-size: 13px;
+  }
+  #verdict { padding: 4px 10px; border-radius: 4px; font-weight: bold; white-space: nowrap; color: #fff; background: #888; }
+  #verdict.allowed { background: #2e7d32; }
+  #verdict.warn    { background: #ef8f00; }
+  #verdict.blocked { background: #c62828; }
+  #verdict.error   { background: #555; }
+  #summary { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #bar button { padding: 6px 12px; font-size: 13px; }
+  #closeBtn { border: none; background: #d32f2f; color: white; border-radius: 4px; }
+
+  #details { max-height: 45%; overflow: auto; padding: 10px 12px; border-bottom: 1px solid #ddd; font-size: 13px; }
+  #details table { border-collapse: collapse; width: 100%; margin-bottom: 12px; }
+  #details td, #details th { border: 1px solid #e3e3e3; padding: 5px 8px; text-align: left; vertical-align: top; }
+  #details th { background: #f3f3f3; }
+  #details code { word-break: break-all; }
+  #details pre { background: #f6f6f6; padding: 8px; overflow: auto; font-size: 12px; margin: 0; }
+  .lvl-block { color: #c62828; font-weight: bold; }
+  .lvl-warn  { color: #b26a00; font-weight: bold; }
+  .lvl-ok    { color: #2e7d32; }
+  .lvl-info  { color: #666; }
+
+  iframe { flex: 1; width: 100%; border: none; }
+</style>
+</head>
+<body>
+
+<h2>Iframe tester</h2>
+
+<div class="controls">
+  <input id="url" type="text" placeholder="https://example.com">
+  <input id="ancestor" type="text" placeholder="Origin мерчанта (необязательно)">
+  <button id="openBtn">Открыть</button>
+</div>
+<p class="hint">
+  Origin мерчанта - для какого сайта оценивать frame-ancestors. Если пусто, проверяется origin этой страницы.
+  Сам iframe всегда грузится отсюда, поэтому браузер ведёт себя как для текущего origin.
+</p>
+
+<div id="overlay">
+  <div id="modal">
+    <div id="bar">
+      <span id="verdict">…</span>
+      <span id="summary"></span>
+      <button id="detailsBtn">Детали</button>
+      <button id="closeBtn">✕ Закрыть</button>
+    </div>
+    <div id="details" hidden></div>
+    <!-- * чтобы payment и passkeys работали и после редиректа на другой origin (3DS/ACS) -->
+    <iframe id="frame" allow="payment *; publickey-credentials-get *"></iframe>
+  </div>
+</div>
+
+<script>
+
+const API_PORT = '8787';
+const API = location.port === API_PORT ? '' : `http://localhost:${API_PORT}`;
+
+const $ = id => document.getElementById(id);
+const overlay = $('overlay'), frame = $('frame'), details = $('details');
+let requestId = 0;
+
+const VERDICT_TEXT = {
+  pending: 'Проверка…',
+  allowed: 'Встраивание разрешено',
+  warn: 'Разрешено, есть риски',
+  blocked: 'Заблокировано',
+  error: 'Ошибка проверки',
+};
+const LEVEL_TEXT = { block: 'Блокирует', warn: 'Риск', ok: 'OK', info: 'Инфо' };
+
+function setVerdict(kind, summary) {
+  $('verdict').className = kind;
+  $('verdict').textContent = VERDICT_TEXT[kind];
+  $('summary').textContent = summary || '';
+  $('summary').title = summary || '';
+}
+
+function el(tag, attrs = {}, ...children) {
+  const n = document.createElement(tag);
+  Object.assign(n, attrs);
+  for (const c of children) n.append(c);
+  return n;
+}
+
+function render(data) {
+  const main = data.findings.find(f => f.level === 'block')
+            || data.findings.find(f => f.level === 'warn')
+            || data.findings[0];
+  setVerdict(data.verdict, main ? `${main.header}: ${main.message}` : '');
+
+  details.replaceChildren();
+  details.append(el('p', {}, `Origin родителя: `, el('code', {}, data.ancestor),
+                    ` · итоговый ответ: ${data.status}`));
+
+  const t = el('table');
+  t.append(el('tr', {}, el('th', {}, 'Уровень'), el('th', {}, 'Заголовок'), el('th', {}, 'Значение'), el('th', {}, 'Причина')));
+  for (const f of data.findings) {
+    t.append(el('tr', {},
+      el('td', { className: 'lvl-' + f.level }, LEVEL_TEXT[f.level]),
+      el('td', {}, f.header),
+      el('td', {}, el('code', {}, f.value)),
+      el('td', {}, f.message)));
+  }
+  details.append(t);
+
+  if (data.chain.length > 1) {
+    details.append(el('p', {}, el('b', {}, 'Цепочка редиректов:')));
+    details.append(el('pre', {}, data.chain.map(c => `${c.status}  ${c.url}`).join('\n')));
+  }
+
+  details.append(el('p', {}, el('b', {}, 'Все заголовки итогового ответа:')));
+  details.append(el('pre', {}, Object.entries(data.headers).map(([k, v]) =>
+    `${k}: ${Array.isArray(v) ? v.join('\n' + k + ': ') : v}`).join('\n')));
+
+  if (data.verdict !== 'allowed') details.hidden = false;
+}
+
+async function checkHeaders(url, ancestor) {
+  const id = ++requestId;
+  setVerdict('pending', '');
+  details.hidden = true;
+  details.replaceChildren();
+  try {
+    const r = await fetch(`${API}/check?` + new URLSearchParams({ url, ancestor }));
+    const data = await r.json();
+    if (id !== requestId) return; // пользователь уже открыл другую ссылку
+    if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+    render(data);
+  } catch (e) {
+    if (id !== requestId) return;
+    const msg = e instanceof TypeError
+      ? 'Сервер проверки недоступен. Запустите: node server.mjs'
+      : e.message;
+    setVerdict('error', msg);
+  }
+}
+
+function openIframe() {
+  let url = $('url').value.trim();
+  if (!url) return;
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+
+  let ancestor = $('ancestor').value.trim();
+  if (ancestor && !/^https?:\/\//i.test(ancestor)) ancestor = 'https://' + ancestor;
+  try { ancestor = ancestor ? new URL(ancestor).origin : location.origin; }
+  catch { ancestor = location.origin; }
+
+  frame.src = url;
+  overlay.style.display = 'flex';
+  checkHeaders(url, ancestor);
+}
+
+function closeIframe() {
+  requestId++; 
+  overlay.style.display = 'none';
+  frame.src = 'about:blank';
+}
+
+$('openBtn').onclick = openIframe;
+$('url').addEventListener('keydown', e => { if (e.key === 'Enter') openIframe(); });
+$('ancestor').addEventListener('keydown', e => { if (e.key === 'Enter') openIframe(); });
+$('closeBtn').onclick = closeIframe;
+$('detailsBtn').onclick = () => { details.hidden = !details.hidden; };
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && overlay.style.display === 'flex') closeIframe(); });
+</script>
+</body>
+</html>
